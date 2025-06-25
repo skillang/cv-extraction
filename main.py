@@ -533,6 +533,82 @@ async def global_exception_handler(request, exc):
         content={"success": False, "message": f"Internal server error: {str(exc)}"}
     )
 
+# Add this debug endpoint to your main.py temporarily
+
+@app.get("/debug-mongo", tags=["Debug"])
+async def debug_mongo_connection():
+    """Debug MongoDB connection with detailed error info"""
+    
+    mongodb_url = os.getenv("MONGODB_URL")
+    
+    debug_info = {
+        "mongodb_url_exists": mongodb_url is not None,
+        "mongodb_url_length": len(mongodb_url) if mongodb_url else 0,
+        "mongodb_url_preview": mongodb_url[:50] + "..." if mongodb_url else None,
+        "connection_attempts": []
+    }
+    
+    if not mongodb_url:
+        debug_info["error"] = "MONGODB_URL environment variable not found"
+        return debug_info
+    
+    # Test 1: Basic connection
+    try:
+        from motor.motor_asyncio import AsyncIOMotorClient
+        test_client = AsyncIOMotorClient(mongodb_url, serverSelectionTimeoutMS=5000)
+        await test_client.admin.command('ping')
+        debug_info["connection_attempts"].append({"test": "basic_ping", "status": "success"})
+        test_client.close()
+    except Exception as e:
+        debug_info["connection_attempts"].append({
+            "test": "basic_ping", 
+            "status": "failed",
+            "error": str(e),
+            "error_type": type(e).__name__
+        })
+    
+    # Test 2: Database access
+    try:
+        test_client = AsyncIOMotorClient(mongodb_url, serverSelectionTimeoutMS=5000)
+        test_db = test_client.get_database()  # Get default database
+        collections = await test_db.list_collection_names()
+        debug_info["connection_attempts"].append({
+            "test": "database_access", 
+            "status": "success",
+            "collections_found": len(collections)
+        })
+        test_client.close()
+    except Exception as e:
+        debug_info["connection_attempts"].append({
+            "test": "database_access",
+            "status": "failed", 
+            "error": str(e),
+            "error_type": type(e).__name__
+        })
+    
+    # Test 3: Specific database access
+    try:
+        test_client = AsyncIOMotorClient(mongodb_url, serverSelectionTimeoutMS=5000)
+        test_db = test_client.skillang_email_scheduler  # Try the existing database
+        collections = await test_db.list_collection_names()
+        debug_info["connection_attempts"].append({
+            "test": "specific_database", 
+            "status": "success",
+            "database": "skillang_email_scheduler",
+            "collections": collections
+        })
+        test_client.close()
+    except Exception as e:
+        debug_info["connection_attempts"].append({
+            "test": "specific_database",
+            "status": "failed",
+            "database": "skillang_email_scheduler", 
+            "error": str(e),
+            "error_type": type(e).__name__
+        })
+    
+    return debug_info
+
 # For Vercel
 if __name__ == "__main__":
     import uvicorn
