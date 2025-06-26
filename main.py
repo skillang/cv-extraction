@@ -534,8 +534,400 @@ class CVExtractor:
             'original_filename': filename,
             'created_at': datetime.now()
         }
-# Initialize extractor
-extractor = CVExtractor()
+# CV Extraction Class - FIXED VERSION
+class CVExtractor:
+    def extract_text_from_pdf(self, file_content: bytes) -> str:
+        try:
+            doc = fitz.open(stream=file_content, filetype="pdf")
+            text = "\n".join([page.get_text() for page in doc])
+            doc.close()
+            return text
+        except Exception as e:
+            raise Exception(f"Error extracting PDF: {str(e)}")
+    
+    def extract_text_from_docx(self, file_content: bytes) -> str:
+        try:
+            doc = docx.Document(io.BytesIO(file_content))
+            return "\n".join([para.text for para in doc.paragraphs])
+        except Exception as e:
+            raise Exception(f"Error extracting DOCX: {str(e)}")
+    
+    def clean_and_validate_name(self, name: str) -> str:
+        """Clean and validate a potential name"""
+        if not name:
+            return ""
+        
+        # Remove common prefixes/suffixes
+        name = re.sub(r'^(mr\.?|mrs\.?|ms\.?|dr\.?|prof\.?)\s*', '', name, flags=re.IGNORECASE)
+        name = re.sub(r'\s*(jr\.?|sr\.?|ii|iii|iv)$', '', name, flags=re.IGNORECASE)
+        
+        # Remove special characters except spaces and dots
+        name = re.sub(r'[^\w\s\.]', '', name)
+        
+        # Remove extra spaces
+        name = ' '.join(name.split())
+        
+        # Remove common non-name words that might be attached
+        exclude_words = [
+            'resume', 'cv', 'curriculum', 'vitae', 'contact', 'phone', 'email', 'mobile',
+            'total', 'work', 'experience', 'years', 'months', 'age', 'personal',
+            'information', 'details', 'profile', 'summary', 'objective', 'about',
+            'skills', 'education', 'qualification', 'training', 'certification',
+            'projects', 'achievements', 'awards', 'languages', 'hobbies', 'interests',
+            'null', 'chapter', 'leaderships', 'leadership', 'memberships', 'membership',
+            'father', 'mother', 'spouse', 'husband', 'wife', 'son', 'daughter'
+        ]
+        
+        words = []
+        for word in name.split():
+            if word.lower() not in exclude_words and len(word) > 1:
+                words.append(word)
+        
+        return ' '.join(words) if words else ""
+
+    def is_valid_name(self, name: str) -> bool:
+        """Validate if the extracted text is likely a real name"""
+        if not name or len(name) < 3:
+            return False
+        
+        words = name.split()
+        
+        # Must have 2-4 words
+        if not (2 <= len(words) <= 4):
+            return False
+        
+        # Check each word
+        for word in words:
+            # Must be alphabetic
+            if not word.isalpha():
+                return False
+            
+            # Must start with capital
+            if not word[0].isupper():
+                return False
+            
+            # Rest should be lowercase (proper case)
+            if not word[1:].islower():
+                return False
+            
+            # Reasonable length (2-15 characters)
+            if not (2 <= len(word) <= 15):
+                return False
+        
+        # Check for common non-name patterns
+        invalid_patterns = [
+            r'(wireshark|cisco|oracle|microsoft|google|apple|amazon|facebook)',
+            r'(java|python|javascript|html|css|sql|php|react|angular)',
+            r'(bachelor|master|degree|diploma|certification|training)',
+            r'(manager|engineer|developer|analyst|consultant|specialist)',
+            r'(experience|education|skills|profile|summary|objective)',
+            r'(personal|contact|mobile|email|phone|address|location)',
+            r'(medical|surgical|nursing|patient|hospital|clinic)',
+            r'(leadership|membership|achievement|project|award)',
+        ]
+        
+        name_lower = name.lower()
+        for pattern in invalid_patterns:
+            if re.search(pattern, name_lower):
+                return False
+        
+        # Check for obvious non-names
+        if any(word in name_lower for word in ['null', 'chapter', 'information', 'details']):
+            return False
+        
+        # Total character length should be reasonable
+        if len(name) > 50:
+            return False
+        
+        return True
+
+    def extract_name(self, text: str) -> str:
+        """Improved name extraction with better accuracy"""
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        
+        # Strategy 1: Look for explicit name labels
+        name_label_patterns = [
+            r'(?:name|full\s*name|candidate\s*name)\s*[:\-]\s*([A-Za-z\s\.]+)',
+            r'(?:applicant|person)\s*[:\-]\s*([A-Za-z\s\.]+)',
+        ]
+        
+        for pattern in name_label_patterns:
+            match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+            if match:
+                name = self.clean_and_validate_name(match.group(1))
+                if self.is_valid_name(name):
+                    return name
+        
+        # Enhanced skip patterns - much more comprehensive
+        skip_patterns = [
+            # Section headers
+            r'^(resume|curriculum|cv|biodata|bio-data)$',
+            r'^(contact|personal|professional|objective|summary|profile|about).*',
+            r'^(education|academic|qualification|experience|work|employment).*',
+            r'^(skills|competencies|technical|key\s*skills|core\s*competencies).*',
+            r'^(projects|achievements|awards|certifications|languages).*',
+            r'^(hobbies|interests|references|declaration).*',
+            r'^(address|location|city|country|nationality).*',
+            
+            # Contact patterns
+            r'.*@.*\.(com|org|net|edu|in)',  # Email addresses
+            r'^(\+?\d{1,3}[\s\-\(\)]*)?\d{3,4}[\s\-\(\)]*\d{3,4}[\s\-]*\d{3,4}',  # Phone numbers
+            r'^(phone|mobile|email|tel|contact).*',
+            
+            # Common false positives
+            r'^(total|years|months|experience).*',
+            r'^(english|hindi|tamil|language).*',
+            r'^(male|female|married|single|age).*',
+            r'^(father|mother|spouse|husband|wife).*',
+            r'^(mr\.|mrs\.|ms\.|dr\.|prof\.).*',
+            
+            # Technical/Job related
+            r'^(software|hardware|programming|coding).*',
+            r'^(manager|developer|engineer|analyst|consultant).*',
+            r'^(java|python|javascript|html|css|sql).*',
+            r'^(microsoft|adobe|google|amazon|apple).*',
+            
+            # Medical/Nursing specific
+            r'^(nursing|medical|surgical|icu|emergency).*',
+            r'^(patient|care|hospital|clinic).*',
+            r'^(bsc|msc|bachelor|master|degree|diploma).*',
+            
+            # All caps headers (likely section titles)
+            r'^[A-Z\s]{4,}$',
+            
+            # Numbers and dates
+            r'^\d+[\s\-/\.]*\d*[\s\-/\.]*\d*$',  # Dates or numbers
+            r'.*\d{4}.*',  # Contains year
+            
+            # Generic words that appear in CVs
+            r'^(null|chapter|information|details|data).*',
+            r'^(leaderships?|memberships?|activities).*',
+            r'^(wireshark|cisco|oracle|sap|salesforce).*',  # Software/certification names
+        ]
+        
+        # Strategy 2: Find potential names in first 20 lines, with better validation
+        potential_names = []
+        
+        for i, line in enumerate(lines[:20]):
+            # Skip empty or very short lines
+            if len(line.strip()) < 3:
+                continue
+                
+            # Skip if matches any skip pattern
+            if any(re.match(pattern, line.strip(), re.IGNORECASE) for pattern in skip_patterns):
+                continue
+            
+            # Clean the line first
+            cleaned_line = self.clean_and_validate_name(line)
+            
+            # Skip if cleaning removed too much
+            if len(cleaned_line) < 3:
+                continue
+                
+            # Check if it looks like a proper name
+            words = cleaned_line.split()
+            
+            # Must be 2-4 words
+            if not (2 <= len(words) <= 4):
+                continue
+            
+            # Each word should be proper case and reasonable length
+            valid_words = []
+            for word in words:
+                if (len(word) >= 2 and 
+                    word[0].isupper() and 
+                    word[1:].islower() and 
+                    word.isalpha() and 
+                    len(word) <= 15):  # Reasonable name length
+                    valid_words.append(word)
+            
+            # Must have at least 2 valid words
+            if len(valid_words) >= 2:
+                candidate_name = ' '.join(valid_words)
+                
+                # Additional validation
+                if self.is_valid_name(candidate_name):
+                    potential_names.append((i, candidate_name))
+        
+        # Return the first valid potential name
+        if potential_names:
+            return potential_names[0][1]
+        
+        # Strategy 3: Look for name patterns anywhere in text with job titles context
+        job_context_patterns = [
+            r'([A-Z][a-z]{2,}\s+[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})?)\s*[,\n]\s*(?:Software Engineer|Data Analyst|Nurse|Doctor|Manager|Developer|Consultant|Specialist|Executive|Officer|Assistant|Coordinator|Director)',
+            r'([A-Z][a-z]{2,}\s+[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})?)\s*[,\n]\s*(?:B\.?Sc|M\.?Sc|MBA|B\.?Tech|M\.?Tech|BCA|MCA|PhD)',
+        ]
+        
+        for pattern in job_context_patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE | re.MULTILINE)
+            for match in matches:
+                name = self.clean_and_validate_name(match)
+                if self.is_valid_name(name):
+                    return name
+        
+        # Strategy 4: Last resort - look for any proper name pattern
+        name_regex = r'\b([A-Z][a-z]{2,}\s+[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})?)\b'
+        matches = re.findall(name_regex, text)
+        
+        for match in matches:
+            # Skip if it contains skip keywords
+            if any(re.search(pattern, match, re.IGNORECASE) for pattern in skip_patterns):
+                continue
+                
+            name = self.clean_and_validate_name(match)
+            if self.is_valid_name(name):
+                return name
+        
+        # Absolute fallback
+        return "Name not found"
+    
+    def extract_email(self, text: str) -> str:
+        pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+        emails = re.findall(pattern, text)
+        
+        # Filter out common false positives
+        valid_emails = [email for email in emails if not any(exclude in email.lower() 
+                       for exclude in ['example.com', 'test.com', 'domain.com'])]
+        
+        return valid_emails[0] if valid_emails else ""
+    
+    def extract_phone(self, text: str) -> str:
+        patterns = [
+            r'\+?\d{1,3}[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}',  # International
+            r'\b\d{10}\b',  # Simple 10 digits
+            r'\(\d{3}\)\s*\d{3}[-.\s]?\d{4}',  # (123) 456-7890
+            r'\+91[-.\s]?\d{10}',  # Indian format
+            r'\(\+91\)\s*\d{10}',  # (+91) 9958630825 format
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, text)
+            if matches:
+                phone = re.sub(r'[^\d+]', '', matches[0])
+                if 10 <= len(phone) <= 15:  # Valid phone length
+                    return phone
+        return ""
+    
+    def extract_age(self, text: str) -> Optional[int]:
+        # Strategy 1: Direct age patterns
+        age_patterns = [
+            r'age\s*[:\-]?\s*(\d{1,2})',
+            r'(\d{1,2})\s*years?\s*old',
+            r'age\s*(\d{1,2})',
+        ]
+        
+        for pattern in age_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                age = int(match.group(1))
+                if 16 <= age <= 80:
+                    return age
+        
+        # Strategy 2: Date of birth patterns
+        dob_patterns = [
+            r'(?:dob|date\s*of\s*birth|born)\s*[:\-]?\s*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})',
+            r'(?:dob|born)\s*[:\-]?\s*(\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+\d{2,4})',
+        ]
+        
+        for pattern in dob_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                try:
+                    date_str = match.group(1)
+                    parsed_date = dateutil.parser.parse(date_str)
+                    if 1940 <= parsed_date.year <= 2010:
+                        return datetime.now().year - parsed_date.year
+                except:
+                    continue
+        
+        return None
+    
+    def extract_skills(self, text: str) -> str:
+        # Strategy 1: Look for explicit skills sections
+        skills_patterns = [
+            r'(?:key\s*skills|technical\s*skills|skills|competencies|technologies)[:\-]?\s*([^\n]*(?:\n[^\n]*){0,15})',
+            r'(?:programming|software|tools)[:\-]?\s*([^\n]*(?:\n[^\n]*){0,8})',
+        ]
+        
+        for pattern in skills_patterns:
+            match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+            if match:
+                skills_text = match.group(1)
+                # Clean and split skills
+                skills = re.split(r'[,;•\n\t]', skills_text)
+                skills = [s.strip() for s in skills if s.strip() and len(s.strip()) > 1]
+                
+                # Filter out common non-skills
+                exclude = ['years', 'experience', 'knowledge', 'familiar', 'working', 'other', 'personal', 'details']
+                skills = [s for s in skills if not any(e in s.lower() for e in exclude) and len(s) < 50]
+                
+                if skills:
+                    return ', '.join(skills[:15])  # Limit to 15 skills
+        
+        # Strategy 2: Look for medical/nursing specific skills
+        medical_keywords = re.findall(r'\b(?:ICU|Medical|Surgical|Nursing|BSc|BLS|ECMO|CRRT|Ventilator|Cardiac|Intensive Care|Emergency|Critical Care|Patient Care)\b', text, re.IGNORECASE)
+        
+        # Strategy 3: Look for general tech keywords
+        tech_keywords = re.findall(r'\b(?:Python|Java|JavaScript|React|Node|SQL|AWS|Docker|Git|HTML|CSS|PHP|C\+\+|Angular|Vue|Django|Flask|Spring|Laravel|MongoDB|PostgreSQL|MySQL)\b', text, re.IGNORECASE)
+        
+        all_keywords = medical_keywords + tech_keywords
+        if all_keywords:
+            # Remove duplicates and limit
+            unique_skills = list(dict.fromkeys(all_keywords))  # Preserves order while removing duplicates
+            return ', '.join(unique_skills[:10])
+        
+        return ""
+    
+    def extract_education(self, text: str) -> str:
+        # Look for education section
+        edu_patterns = [
+            r'(?:education|academic|qualification)[:\-]?\s*([^\n]*(?:\n[^\n]*){0,8})',
+            r'(b\.?sc|bachelor|master|phd|degree|diploma|b\.?tech|m\.?tech|mba|bca|mca|be|me|ms|bs).*?(?:university|college|institute|school)',
+            r'(?:university|college|institute)[:\-]?\s*([^\n]*(?:\n[^\n]*){0,5})',
+        ]
+        
+        for pattern in edu_patterns:
+            match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+            if match:
+                edu_text = match.group(1) if match.groups() else match.group(0)
+                # Clean education text
+                edu_text = ' '.join(edu_text.split()[:30])  # Limit length
+                edu_text = re.sub(r'\d{4}', '', edu_text)  # Remove years for cleaner display
+                return edu_text.strip()
+        
+        return ""
+    
+    def extract_experience(self, text: str) -> str:
+        # Look for experience patterns
+        exp_patterns = [
+            r'(?:total\s*work\s*experience|work\s*experience|experience)[:\-]?\s*([^\n]*(?:\n[^\n]*){0,3})',
+            r'(\d+\+?\s*years?\s*(?:\d+\s*months?)?\s*(?:of\s*)?experience)',
+            r'(?:worked|working)\s*(?:as|at)\s*([^\n]*)',
+            r'(\d+\s*years?\s*\d+\s*months?)',  # Pattern like "7 Years 8 Months"
+        ]
+        
+        for pattern in exp_patterns:
+            match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+            if match:
+                exp_text = match.group(1) if match.groups() else match.group(0)
+                exp_text = ' '.join(exp_text.split()[:25])  # Limit length
+                return exp_text.strip()
+        
+        return ""
+    
+    def extract_all_details(self, text: str, filename: str) -> dict:
+        return {
+            'name': self.extract_name(text),
+            'email': self.extract_email(text),
+            'phone': self.extract_phone(text),
+            'age': self.extract_age(text),
+            'skills': self.extract_skills(text),
+            'education': self.extract_education(text),
+            'experience': self.extract_experience(text),
+            'original_filename': filename,
+            'created_at': datetime.now()
+        }
 
 # API Endpoints
 @app.get("/", tags=["Health"])
