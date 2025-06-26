@@ -38,7 +38,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# MongoDB Configuration
+# MongoDB Configuration - Optimized for Serverless
 MONGODB_URL = os.getenv("MONGODB_URL")
 client = None
 database = None
@@ -75,26 +75,43 @@ class StatsResponse(BaseModel):
     top_skills: List[str]
     database_status: str
 
-# Initialize MongoDB connection with proper error handling
-async def init_db():
+# Optimized MongoDB connection for Vercel/Serverless
+async def get_database():
+    """Get database connection with serverless optimization"""
     global client, database, candidates_collection
     
     if not MONGODB_URL:
         print("❌ MONGODB_URL environment variable not set")
-        return
+        return None, None
+    
+    # If connection exists and is healthy, reuse it
+    if client is not None:
+        try:
+            # Quick ping to check if connection is alive
+            await client.admin.command('ping')
+            return database, candidates_collection
+        except Exception as e:
+            print(f"⚠️ Existing connection failed, reconnecting: {e}")
+            client = None
     
     try:
-        print(f"🔄 Connecting to MongoDB...")
+        print(f"🔄 Creating new MongoDB connection...")
         
-        # Create client with appropriate settings for serverless
+        # Serverless-optimized connection settings
         client = AsyncIOMotorClient(
             MONGODB_URL,
-            serverSelectionTimeoutMS=5000,
-            connectTimeoutMS=10000,
-            maxPoolSize=1
+            # Optimized for serverless/Vercel
+            serverSelectionTimeoutMS=3000,    # Reduced timeout
+            connectTimeoutMS=3000,            # Reduced timeout
+            socketTimeoutMS=3000,             # Socket timeout
+            maxPoolSize=1,                    # Single connection for serverless
+            minPoolSize=0,                    # No minimum pool
+            maxIdleTimeMS=10000,              # Close idle connections quickly
+            retryWrites=True,                 # Enable retry writes
+            w="majority"                      # Write concern
         )
         
-        # Test connection
+        # Test connection immediately
         await client.admin.command('ping')
         print("✅ MongoDB connection successful")
         
@@ -102,20 +119,28 @@ async def init_db():
         database = client.cv_database
         candidates_collection = database.candidates
         
-        # Test collection access
+        # Verify collection access
         count = await candidates_collection.count_documents({})
-        print(f"✅ Database initialized: cv_database")
-        print(f"✅ Collection ready: candidates (documents: {count})")
+        print(f"✅ Database ready: cv_database (documents: {count})")
+        
+        return database, candidates_collection
         
     except Exception as e:
-        print(f"❌ MongoDB initialization failed: {e}")
-        print(f"❌ Error type: {type(e).__name__}")
+        print(f"❌ MongoDB connection failed: {e}")
         client = None
         database = None
         candidates_collection = None
+        return None, None
 
-# Improved CV Extraction Class - Replace the existing CVExtractor class in main.py
+# Helper function to ensure database connection
+async def ensure_db_connection():
+    """Ensure database connection before operations"""
+    db, collection = await get_database()
+    if collection is None:
+        raise HTTPException(status_code=500, detail="Database connection failed. Please check MongoDB configuration.")
+    return db, collection
 
+# CV Extraction Class
 class CVExtractor:
     def extract_text_from_pdf(self, file_content: bytes) -> str:
         try:
@@ -150,7 +175,6 @@ class CVExtractor:
                     return name
         
         # Strategy 2: Look for name patterns that appear with job titles
-        # Common pattern: "Full Name" followed by job title
         job_title_patterns = [
             r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\s*\n\s*(?:Intensive Care Nurse|Software Engineer|Manager|Developer|Analyst|Consultant|Specialist|Executive|Officer|Assistant|Coordinator|Director|Lead|Senior|Junior)',
             r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\s*(?:Intensive Care Nurse|Software Engineer|Manager|Developer|Analyst|Consultant|Specialist|Executive|Officer|Assistant|Coordinator|Director|Lead|Senior|Junior)',
@@ -275,35 +299,6 @@ class CVExtractor:
                 except:
                     continue
         
-        # Strategy 3: Calculate from education (if 10th standard year is available)
-        # Assuming person was ~16 when they completed 10th standard
-        tenth_patterns = [
-            r'(?:xth|10th|class\s*10|tenth)\s*.*?(\d{4})',
-            r'(\d{4})\s*.*?(?:xth|10th|class\s*10|tenth)',
-            r'2008.*?(?:xth|10th|english)',  # For the specific resume format
-        ]
-        
-        for pattern in tenth_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                try:
-                    year = int(match.group(1))
-                    if 1990 <= year <= 2015:  # Reasonable range
-                        estimated_age = datetime.now().year - year + 16
-                        if 18 <= estimated_age <= 60:  # Reasonable age range
-                            return estimated_age
-                except:
-                    continue
-        
-        # Strategy 4: Look for birth year in any 4-digit year that makes sense
-        birth_year_pattern = r'\b(19[8-9]\d|20[0-1]\d)\b'
-        years = re.findall(birth_year_pattern, text)
-        for year_str in years:
-            year = int(year_str)
-            estimated_age = datetime.now().year - year
-            if 18 <= estimated_age <= 60:  # If it results in reasonable age
-                return estimated_age
-        
         return None
     
     def extract_skills(self, text: str) -> str:
@@ -396,12 +391,6 @@ class CVExtractor:
 extractor = CVExtractor()
 
 # API Endpoints
-@app.on_event("startup")
-async def startup_event():
-    print("🚀 Starting Skillang CV Extractor API...")
-    await init_db()
-    print("✅ Application startup complete")
-
 @app.get("/", tags=["Health"])
 async def root():
     return {
@@ -418,18 +407,16 @@ async def health_check():
     
     if not MONGODB_URL:
         error_detail = "MONGODB_URL not configured"
-    elif client is None:
-        error_detail = "MongoDB client not initialized" 
     else:
         try:
-            # Test live connection
-            await client.admin.command('ping')
-            if candidates_collection is not None:  # FIXED: Changed from "if candidates_collection"
+            # Test connection
+            db, collection = await get_database()
+            if db is not None and collection is not None:
                 # Test collection access
-                await candidates_collection.count_documents({})
+                await collection.count_documents({})
                 db_status = "connected"
             else:
-                error_detail = "Collection not initialized"
+                error_detail = "Database connection failed"
         except Exception as e:
             error_detail = f"Connection test failed: {str(e)}"
     
@@ -438,6 +425,7 @@ async def health_check():
         "database": db_status,
         "timestamp": datetime.now().isoformat(),
         "mongodb_configured": MONGODB_URL is not None,
+        "environment": "vercel" if os.getenv("VERCEL") else "local",
         "error_detail": error_detail
     }
 
@@ -451,6 +439,8 @@ async def debug_mongo_connection():
         "mongodb_url_exists": mongodb_url is not None,
         "mongodb_url_length": len(mongodb_url) if mongodb_url else 0,
         "mongodb_url_preview": mongodb_url[:50] + "..." if mongodb_url else None,
+        "environment": "vercel" if os.getenv("VERCEL") else "local",
+        "vercel_env": os.getenv("VERCEL_ENV", "unknown"),
         "connection_attempts": []
     }
     
@@ -458,56 +448,32 @@ async def debug_mongo_connection():
         debug_info["error"] = "MONGODB_URL environment variable not found"
         return debug_info
     
-    # Test 1: Basic connection
+    # Test connection with serverless settings
     try:
-        test_client = AsyncIOMotorClient(mongodb_url, serverSelectionTimeoutMS=5000)
+        test_client = AsyncIOMotorClient(
+            mongodb_url, 
+            serverSelectionTimeoutMS=3000,
+            connectTimeoutMS=3000,
+            maxPoolSize=1
+        )
         await test_client.admin.command('ping')
-        debug_info["connection_attempts"].append({"test": "basic_ping", "status": "success"})
-        test_client.close()
-    except Exception as e:
-        debug_info["connection_attempts"].append({
-            "test": "basic_ping", 
-            "status": "failed",
-            "error": str(e),
-            "error_type": type(e).__name__
-        })
-    
-    # Test 2: Database access
-    try:
-        test_client = AsyncIOMotorClient(mongodb_url, serverSelectionTimeoutMS=5000)
-        test_db = test_client.get_database()  # Get default database
-        collections = await test_db.list_collection_names()
-        debug_info["connection_attempts"].append({
-            "test": "database_access", 
-            "status": "success",
-            "collections_found": len(collections)
-        })
-        test_client.close()
-    except Exception as e:
-        debug_info["connection_attempts"].append({
-            "test": "database_access",
-            "status": "failed", 
-            "error": str(e),
-            "error_type": type(e).__name__
-        })
-    
-    # Test 3: CV database access
-    try:
-        test_client = AsyncIOMotorClient(mongodb_url, serverSelectionTimeoutMS=5000)
+        debug_info["connection_attempts"].append({"test": "serverless_ping", "status": "success"})
+        
+        # Test database access
         test_db = test_client.cv_database
         collections = await test_db.list_collection_names()
         debug_info["connection_attempts"].append({
             "test": "cv_database", 
             "status": "success",
-            "database": "cv_database",
             "collections": collections
         })
+        
         test_client.close()
+        
     except Exception as e:
         debug_info["connection_attempts"].append({
-            "test": "cv_database",
+            "test": "serverless_connection", 
             "status": "failed",
-            "database": "cv_database", 
             "error": str(e),
             "error_type": type(e).__name__
         })
@@ -516,15 +482,10 @@ async def debug_mongo_connection():
 
 @app.post("/extract-and-store", response_model=ExtractResponse, tags=["CV Processing"])
 async def extract_and_store_cvs(files: List[UploadFile] = File(...)):
-    """
-    Extract CV data from uploaded files and store in database
+    """Extract CV data from uploaded files and store in database"""
     
-    - **files**: List of PDF or DOCX files (max 20)
-    - Returns: Extracted candidate data with database storage
-    """
-    
-    if candidates_collection is None:  # FIXED: Changed from "if not candidates_collection"
-        raise HTTPException(status_code=500, detail="Database not connected. Check MongoDB configuration.")
+    # Ensure database connection
+    db, collection = await ensure_db_connection()
     
     if len(files) > 20:
         raise HTTPException(status_code=400, detail="Maximum 20 files allowed per request")
@@ -563,7 +524,7 @@ async def extract_and_store_cvs(files: List[UploadFile] = File(...)):
             candidate_data = extractor.extract_all_details(text, file.filename)
             
             # Store in database
-            result = await candidates_collection.insert_one(candidate_data)
+            result = await collection.insert_one(candidate_data)
             candidate_data['id'] = str(result.inserted_id)
             
             # Remove MongoDB ObjectId for response
@@ -590,8 +551,8 @@ async def get_candidates(
 ):
     """Get all candidates with optional search and pagination"""
     
-    if candidates_collection is None:  # FIXED: Changed from "if not candidates_collection"
-        raise HTTPException(status_code=500, detail="Database not connected")
+    # Ensure database connection
+    db, collection = await ensure_db_connection()
     
     # Build query
     query = {}
@@ -606,10 +567,10 @@ async def get_candidates(
         }
     
     # Get total count
-    total_count = await candidates_collection.count_documents(query)
+    total_count = await collection.count_documents(query)
     
     # Get candidates
-    cursor = candidates_collection.find(query).skip(skip).limit(limit).sort("created_at", -1)
+    cursor = collection.find(query).skip(skip).limit(limit).sort("created_at", -1)
     candidates = await cursor.to_list(length=limit)
     
     # Format response
@@ -628,11 +589,11 @@ async def get_candidates(
 async def get_candidate(candidate_id: str):
     """Get specific candidate by ID"""
     
-    if candidates_collection is None:  # FIXED: Changed from "if not candidates_collection"
-        raise HTTPException(status_code=500, detail="Database not connected")
+    # Ensure database connection
+    db, collection = await ensure_db_connection()
     
     try:
-        candidate = await candidates_collection.find_one({"_id": ObjectId(candidate_id)})
+        candidate = await collection.find_one({"_id": ObjectId(candidate_id)})
         if not candidate:
             raise HTTPException(status_code=404, detail="Candidate not found")
         
@@ -646,11 +607,11 @@ async def get_candidate(candidate_id: str):
 async def delete_candidate(candidate_id: str):
     """Delete a candidate"""
     
-    if candidates_collection is None:  # FIXED: Changed from "if not candidates_collection"
-        raise HTTPException(status_code=500, detail="Database not connected")
+    # Ensure database connection
+    db, collection = await ensure_db_connection()
     
     try:
-        result = await candidates_collection.delete_one({"_id": ObjectId(candidate_id)})
+        result = await collection.delete_one({"_id": ObjectId(candidate_id)})
         if result.deleted_count == 0:
             raise HTTPException(status_code=404, detail="Candidate not found")
         
@@ -663,21 +624,16 @@ async def delete_candidate(candidate_id: str):
 async def get_stats():
     """Get database and extraction statistics"""
     
-    if candidates_collection is None:  # FIXED: Changed from "if not candidates_collection"
-        return StatsResponse(
-            total_candidates=0,
-            recent_uploads=0,
-            top_skills=[],
-            database_status="disconnected"
-        )
-    
     try:
+        # Ensure database connection
+        db, collection = await ensure_db_connection()
+        
         # Total candidates
-        total_candidates = await candidates_collection.count_documents({})
+        total_candidates = await collection.count_documents({})
         
         # Recent uploads (last 7 days)
         week_ago = datetime.now() - timedelta(days=7)
-        recent_uploads = await candidates_collection.count_documents({
+        recent_uploads = await collection.count_documents({
             "created_at": {"$gte": week_ago}
         })
         
@@ -692,7 +648,7 @@ async def get_stats():
             {"$limit": 10}
         ]
         
-        top_skills_cursor = candidates_collection.aggregate(pipeline)
+        top_skills_cursor = collection.aggregate(pipeline)
         top_skills_data = await top_skills_cursor.to_list(length=10)
         top_skills = [item["_id"] for item in top_skills_data if item["_id"]]
         
@@ -728,7 +684,7 @@ async def global_exception_handler(request, exc):
         content={"success": False, "message": f"Internal server error: {str(exc)}"}
     )
 
-# For Vercel
+# For Vercel - No startup event needed, connections are made on-demand
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
