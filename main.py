@@ -114,7 +114,8 @@ async def init_db():
         database = None
         candidates_collection = None
 
-# CV Extraction Class
+# Improved CV Extraction Class - Replace the existing CVExtractor class in main.py
+
 class CVExtractor:
     def extract_text_from_pdf(self, file_content: bytes) -> str:
         try:
@@ -148,27 +149,60 @@ class CVExtractor:
                 if name and len(name.split()) >= 2:
                     return name
         
-        # Strategy 2: First meaningful line with proper name format
-        skip_patterns = [
-            r'resume|curriculum|cv|contact|phone|email|address|objective|summary',
-            r'^\d+[\s\-\(\)]+',  # Phone numbers
-            r'@',  # Email addresses
-            r'^[A-Z]{2,}\s',  # All caps headers
+        # Strategy 2: Look for name patterns that appear with job titles
+        # Common pattern: "Full Name" followed by job title
+        job_title_patterns = [
+            r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\s*\n\s*(?:Intensive Care Nurse|Software Engineer|Manager|Developer|Analyst|Consultant|Specialist|Executive|Officer|Assistant|Coordinator|Director|Lead|Senior|Junior)',
+            r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\s*(?:Intensive Care Nurse|Software Engineer|Manager|Developer|Analyst|Consultant|Specialist|Executive|Officer|Assistant|Coordinator|Director|Lead|Senior|Junior)',
         ]
         
-        for line in lines[:5]:
-            if not any(re.search(pattern, line, re.IGNORECASE) for pattern in skip_patterns):
-                # Check if it looks like a name (2+ words, proper case)
-                if re.match(r'^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+$', line.strip()):
-                    return self.clean_name(line)
+        for pattern in job_title_patterns:
+            match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+            if match:
+                name = self.clean_name(match.group(1))
+                if name and len(name.split()) >= 2:
+                    return name
         
-        # Strategy 3: Look for name-like patterns anywhere in first few lines
-        for line in lines[:3]:
+        # Strategy 3: Skip common headers and look for proper names
+        skip_patterns = [
+            r'resume|curriculum|cv|contact|phone|email|address|objective|summary|personal\s*information',
+            r'^\d+[\s\-\(\)]+',  # Phone numbers
+            r'@',  # Email addresses
+            r'^[A-Z\s]{3,}$',  # All caps headers like "PERSONAL INFORMATION"
+            r'key\s*skills|work\s*experience|education|profile|about',
+            r'mobile|total\s*work|city|country|hobbies|languages'
+        ]
+        
+        potential_names = []
+        
+        for i, line in enumerate(lines[:15]):  # Check first 15 lines
+            # Skip if matches any skip pattern
+            if any(re.search(pattern, line, re.IGNORECASE) for pattern in skip_patterns):
+                continue
+            
+            # Look for lines that could be names (2-4 words, proper case)
             words = line.split()
-            if 2 <= len(words) <= 4:  # Names typically 2-4 words
-                if all(word[0].isupper() and word[1:].islower() for word in words if word.isalpha()):
-                    return self.clean_name(line)
+            if 2 <= len(words) <= 4:
+                # Check if it looks like a proper name
+                if all(word[0].isupper() and len(word) > 1 and word[1:].islower() for word in words if word.isalpha()):
+                    # Additional check: make sure it's not a common non-name phrase
+                    non_name_words = ['Email', 'Mobile', 'Total', 'Years', 'Months', 'City', 'Country', 'English', 'Hindi']
+                    if not any(word in non_name_words for word in words):
+                        potential_names.append((i, self.clean_name(line)))
         
+        # Return the first valid potential name
+        if potential_names:
+            return potential_names[0][1]
+        
+        # Strategy 4: Look anywhere in text for name-like patterns
+        name_regex = r'\b([A-Z][a-z]{2,}\s+[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})?)\b'
+        matches = re.findall(name_regex, text)
+        
+        for match in matches:
+            if not any(re.search(pattern, match, re.IGNORECASE) for pattern in skip_patterns):
+                return self.clean_name(match)
+        
+        # Fallback: return first non-empty line (but limit length)
         return lines[0][:50] if lines else "Name not found"
     
     def clean_name(self, name: str) -> str:
@@ -177,7 +211,7 @@ class CVExtractor:
         name = ' '.join(name.split())  # Remove extra spaces
         
         # Filter out common non-name words
-        exclude_words = ['resume', 'cv', 'curriculum', 'vitae', 'contact', 'phone', 'email']
+        exclude_words = ['resume', 'cv', 'curriculum', 'vitae', 'contact', 'phone', 'email', 'mobile', 'total', 'work']
         words = [word for word in name.split() if word.lower() not in exclude_words]
         
         return ' '.join(words) if words else name
@@ -198,6 +232,7 @@ class CVExtractor:
             r'\b\d{10}\b',  # Simple 10 digits
             r'\(\d{3}\)\s*\d{3}[-.\s]?\d{4}',  # (123) 456-7890
             r'\+91[-.\s]?\d{10}',  # Indian format
+            r'\(\+91\)\s*\d{10}',  # (+91) 9958630825 format
         ]
         
         for pattern in patterns:
@@ -209,7 +244,7 @@ class CVExtractor:
         return ""
     
     def extract_age(self, text: str) -> Optional[int]:
-        # Direct age patterns
+        # Strategy 1: Direct age patterns
         age_patterns = [
             r'age\s*[:\-]?\s*(\d{1,2})',
             r'(\d{1,2})\s*years?\s*old',
@@ -223,7 +258,7 @@ class CVExtractor:
                 if 16 <= age <= 80:
                     return age
         
-        # Date of birth patterns
+        # Strategy 2: Date of birth patterns
         dob_patterns = [
             r'(?:dob|date\s*of\s*birth|born)\s*[:\-]?\s*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})',
             r'(?:dob|born)\s*[:\-]?\s*(\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+\d{2,4})',
@@ -240,13 +275,42 @@ class CVExtractor:
                 except:
                     continue
         
+        # Strategy 3: Calculate from education (if 10th standard year is available)
+        # Assuming person was ~16 when they completed 10th standard
+        tenth_patterns = [
+            r'(?:xth|10th|class\s*10|tenth)\s*.*?(\d{4})',
+            r'(\d{4})\s*.*?(?:xth|10th|class\s*10|tenth)',
+            r'2008.*?(?:xth|10th|english)',  # For the specific resume format
+        ]
+        
+        for pattern in tenth_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                try:
+                    year = int(match.group(1))
+                    if 1990 <= year <= 2015:  # Reasonable range
+                        estimated_age = datetime.now().year - year + 16
+                        if 18 <= estimated_age <= 60:  # Reasonable age range
+                            return estimated_age
+                except:
+                    continue
+        
+        # Strategy 4: Look for birth year in any 4-digit year that makes sense
+        birth_year_pattern = r'\b(19[8-9]\d|20[0-1]\d)\b'
+        years = re.findall(birth_year_pattern, text)
+        for year_str in years:
+            year = int(year_str)
+            estimated_age = datetime.now().year - year
+            if 18 <= estimated_age <= 60:  # If it results in reasonable age
+                return estimated_age
+        
         return None
     
     def extract_skills(self, text: str) -> str:
-        # Look for skills section
+        # Strategy 1: Look for explicit skills sections
         skills_patterns = [
-            r'(?:technical\s*skills|skills|competencies|technologies)[:\-]?\s*([^\n]*(?:\n[^\n]*){0,10})',
-            r'(?:programming|software|tools)[:\-]?\s*([^\n]*(?:\n[^\n]*){0,5})',
+            r'(?:key\s*skills|technical\s*skills|skills|competencies|technologies)[:\-]?\s*([^\n]*(?:\n[^\n]*){0,15})',
+            r'(?:programming|software|tools)[:\-]?\s*([^\n]*(?:\n[^\n]*){0,8})',
         ]
         
         for pattern in skills_patterns:
@@ -255,27 +319,35 @@ class CVExtractor:
                 skills_text = match.group(1)
                 # Clean and split skills
                 skills = re.split(r'[,;•\n\t]', skills_text)
-                skills = [s.strip() for s in skills if s.strip() and len(s.strip()) > 2]
+                skills = [s.strip() for s in skills if s.strip() and len(s.strip()) > 1]
                 
                 # Filter out common non-skills
-                exclude = ['years', 'experience', 'knowledge', 'familiar', 'working']
-                skills = [s for s in skills if not any(e in s.lower() for e in exclude)]
+                exclude = ['years', 'experience', 'knowledge', 'familiar', 'working', 'other', 'personal', 'details']
+                skills = [s for s in skills if not any(e in s.lower() for e in exclude) and len(s) < 50]
                 
-                return ', '.join(skills[:15])  # Limit to 15 skills
+                if skills:
+                    return ', '.join(skills[:15])  # Limit to 15 skills
         
-        # Fallback: Look for common tech keywords
+        # Strategy 2: Look for medical/nursing specific skills
+        medical_keywords = re.findall(r'\b(?:ICU|Medical|Surgical|Nursing|BSc|BLS|ECMO|CRRT|Ventilator|Cardiac|Intensive Care|Emergency|Critical Care|Patient Care)\b', text, re.IGNORECASE)
+        
+        # Strategy 3: Look for general tech keywords
         tech_keywords = re.findall(r'\b(?:Python|Java|JavaScript|React|Node|SQL|AWS|Docker|Git|HTML|CSS|PHP|C\+\+|Angular|Vue|Django|Flask|Spring|Laravel|MongoDB|PostgreSQL|MySQL)\b', text, re.IGNORECASE)
         
-        if tech_keywords:
-            return ', '.join(list(set(tech_keywords))[:10])
+        all_keywords = medical_keywords + tech_keywords
+        if all_keywords:
+            # Remove duplicates and limit
+            unique_skills = list(dict.fromkeys(all_keywords))  # Preserves order while removing duplicates
+            return ', '.join(unique_skills[:10])
         
         return ""
     
     def extract_education(self, text: str) -> str:
+        # Look for education section
         edu_patterns = [
-            r'(?:education|academic|qualification)[:\-]?\s*([^\n]*(?:\n[^\n]*){0,5})',
-            r'(bachelor|master|phd|degree|diploma|b\.tech|m\.tech|mba|bca|mca|be|me|ms|bs).*',
-            r'(?:university|college|institute)[:\-]?\s*([^\n]*(?:\n[^\n]*){0,3})',
+            r'(?:education|academic|qualification)[:\-]?\s*([^\n]*(?:\n[^\n]*){0,8})',
+            r'(b\.?sc|bachelor|master|phd|degree|diploma|b\.?tech|m\.?tech|mba|bca|mca|be|me|ms|bs).*?(?:university|college|institute|school)',
+            r'(?:university|college|institute)[:\-]?\s*([^\n]*(?:\n[^\n]*){0,5})',
         ]
         
         for pattern in edu_patterns:
@@ -283,23 +355,26 @@ class CVExtractor:
             if match:
                 edu_text = match.group(1) if match.groups() else match.group(0)
                 # Clean education text
-                edu_text = ' '.join(edu_text.split()[:25])  # Limit length
+                edu_text = ' '.join(edu_text.split()[:30])  # Limit length
+                edu_text = re.sub(r'\d{4}', '', edu_text)  # Remove years for cleaner display
                 return edu_text.strip()
         
         return ""
     
     def extract_experience(self, text: str) -> str:
+        # Look for experience patterns
         exp_patterns = [
-            r'(?:experience|work\s*experience|employment)[:\-]?\s*([^\n]*(?:\n[^\n]*){0,8})',
-            r'(\d+\+?\s*years?\s*(?:of\s*)?experience)',
+            r'(?:total\s*work\s*experience|work\s*experience|experience)[:\-]?\s*([^\n]*(?:\n[^\n]*){0,3})',
+            r'(\d+\+?\s*years?\s*(?:\d+\s*months?)?\s*(?:of\s*)?experience)',
             r'(?:worked|working)\s*(?:as|at)\s*([^\n]*)',
+            r'(\d+\s*years?\s*\d+\s*months?)',  # Pattern like "7 Years 8 Months"
         ]
         
         for pattern in exp_patterns:
             match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
             if match:
                 exp_text = match.group(1) if match.groups() else match.group(0)
-                exp_text = ' '.join(exp_text.split()[:30])  # Limit length
+                exp_text = ' '.join(exp_text.split()[:25])  # Limit length
                 return exp_text.strip()
         
         return ""
@@ -349,7 +424,7 @@ async def health_check():
         try:
             # Test live connection
             await client.admin.command('ping')
-            if candidates_collection is not None:
+            if candidates_collection is not None:  # FIXED: Changed from "if candidates_collection"
                 # Test collection access
                 await candidates_collection.count_documents({})
                 db_status = "connected"
@@ -448,7 +523,7 @@ async def extract_and_store_cvs(files: List[UploadFile] = File(...)):
     - Returns: Extracted candidate data with database storage
     """
     
-    if not candidates_collection:
+    if candidates_collection is None:  # FIXED: Changed from "if not candidates_collection"
         raise HTTPException(status_code=500, detail="Database not connected. Check MongoDB configuration.")
     
     if len(files) > 20:
@@ -515,7 +590,7 @@ async def get_candidates(
 ):
     """Get all candidates with optional search and pagination"""
     
-    if not candidates_collection:
+    if candidates_collection is None:  # FIXED: Changed from "if not candidates_collection"
         raise HTTPException(status_code=500, detail="Database not connected")
     
     # Build query
@@ -553,7 +628,7 @@ async def get_candidates(
 async def get_candidate(candidate_id: str):
     """Get specific candidate by ID"""
     
-    if not candidates_collection:
+    if candidates_collection is None:  # FIXED: Changed from "if not candidates_collection"
         raise HTTPException(status_code=500, detail="Database not connected")
     
     try:
@@ -571,7 +646,7 @@ async def get_candidate(candidate_id: str):
 async def delete_candidate(candidate_id: str):
     """Delete a candidate"""
     
-    if not candidates_collection:
+    if candidates_collection is None:  # FIXED: Changed from "if not candidates_collection"
         raise HTTPException(status_code=500, detail="Database not connected")
     
     try:
@@ -588,7 +663,7 @@ async def delete_candidate(candidate_id: str):
 async def get_stats():
     """Get database and extraction statistics"""
     
-    if not candidates_collection:
+    if candidates_collection is None:  # FIXED: Changed from "if not candidates_collection"
         return StatsResponse(
             total_candidates=0,
             recent_uploads=0,
