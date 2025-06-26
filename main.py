@@ -140,7 +140,7 @@ async def ensure_db_connection():
         raise HTTPException(status_code=500, detail="Database connection failed. Please check MongoDB configuration.")
     return db, collection
 
-# CV Extraction Class
+# CV Extraction Class - IMPROVED VERSION
 class CVExtractor:
     def extract_text_from_pdf(self, file_content: bytes) -> str:
         try:
@@ -159,86 +159,234 @@ class CVExtractor:
             raise Exception(f"Error extracting DOCX: {str(e)}")
     
     def extract_name(self, text: str) -> str:
+        """Improved name extraction with better accuracy"""
         lines = [line.strip() for line in text.split('\n') if line.strip()]
         
-        # Strategy 1: Look for explicit name patterns
-        name_patterns = [
-            r'(?:name|full\s*name)\s*[:\-]\s*([A-Za-z\s\.]+)',
-            r'(?:candidate|applicant)\s*[:\-]\s*([A-Za-z\s\.]+)',
+        # Strategy 1: Look for explicit name labels
+        name_label_patterns = [
+            r'(?:name|full\s*name|candidate\s*name)\s*[:\-]\s*([A-Za-z\s\.]+)',
+            r'(?:applicant|person)\s*[:\-]\s*([A-Za-z\s\.]+)',
         ]
         
-        for pattern in name_patterns:
+        for pattern in name_label_patterns:
             match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
             if match:
-                name = self.clean_name(match.group(1))
-                if name and len(name.split()) >= 2:
+                name = self.clean_and_validate_name(match.group(1))
+                if self.is_valid_name(name):
                     return name
         
-        # Strategy 2: Look for name patterns that appear with job titles
-        job_title_patterns = [
-            r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\s*\n\s*(?:Intensive Care Nurse|Software Engineer|Manager|Developer|Analyst|Consultant|Specialist|Executive|Officer|Assistant|Coordinator|Director|Lead|Senior|Junior)',
-            r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\s*(?:Intensive Care Nurse|Software Engineer|Manager|Developer|Analyst|Consultant|Specialist|Executive|Officer|Assistant|Coordinator|Director|Lead|Senior|Junior)',
-        ]
-        
-        for pattern in job_title_patterns:
-            match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
-            if match:
-                name = self.clean_name(match.group(1))
-                if name and len(name.split()) >= 2:
-                    return name
-        
-        # Strategy 3: Skip common headers and look for proper names
+        # Enhanced skip patterns - much more comprehensive
         skip_patterns = [
-            r'resume|curriculum|cv|contact|phone|email|address|objective|summary|personal\s*information',
-            r'^\d+[\s\-\(\)]+',  # Phone numbers
-            r'@',  # Email addresses
-            r'^[A-Z\s]{3,}$',  # All caps headers like "PERSONAL INFORMATION"
-            r'key\s*skills|work\s*experience|education|profile|about',
-            r'mobile|total\s*work|city|country|hobbies|languages'
+            # Section headers
+            r'^(resume|curriculum|cv|biodata|bio-data)$',
+            r'^(contact|personal|professional|objective|summary|profile|about).*',
+            r'^(education|academic|qualification|experience|work|employment).*',
+            r'^(skills|competencies|technical|key\s*skills|core\s*competencies).*',
+            r'^(projects|achievements|awards|certifications|languages).*',
+            r'^(hobbies|interests|references|declaration).*',
+            r'^(address|location|city|country|nationality).*',
+            
+            # Contact patterns
+            r'.*@.*\.(com|org|net|edu|in)',  # Email addresses
+            r'^(\+?\d{1,3}[\s\-\(\)]*)?\d{3,4}[\s\-\(\)]*\d{3,4}[\s\-]*\d{3,4}',  # Phone numbers
+            r'^(phone|mobile|email|tel|contact).*',
+            
+            # Common false positives
+            r'^(total|years|months|experience).*',
+            r'^(english|hindi|tamil|language).*',
+            r'^(male|female|married|single|age).*',
+            r'^(father|mother|spouse|husband|wife).*',
+            r'^(mr\.|mrs\.|ms\.|dr\.|prof\.).*',
+            
+            # Technical/Job related
+            r'^(software|hardware|programming|coding).*',
+            r'^(manager|developer|engineer|analyst|consultant).*',
+            r'^(java|python|javascript|html|css|sql).*',
+            r'^(microsoft|adobe|google|amazon|apple).*',
+            
+            # Medical/Nursing specific
+            r'^(nursing|medical|surgical|icu|emergency).*',
+            r'^(patient|care|hospital|clinic).*',
+            r'^(bsc|msc|bachelor|master|degree|diploma).*',
+            
+            # All caps headers (likely section titles)
+            r'^[A-Z\s]{4,}$',
+            
+            # Numbers and dates
+            r'^\d+[\s\-/\.]*\d*[\s\-/\.]*\d*$',  # Dates or numbers
+            r'.*\d{4}.*',  # Contains year
+            
+            # Generic words that appear in CVs
+            r'^(null|chapter|information|details|data).*',
+            r'^(leaderships?|memberships?|activities).*',
+            r'^(wireshark|cisco|oracle|sap|salesforce).*',  # Software/certification names
         ]
         
+        # Strategy 2: Find potential names in first 20 lines, with better validation
         potential_names = []
         
-        for i, line in enumerate(lines[:15]):  # Check first 15 lines
+        for i, line in enumerate(lines[:20]):
+            # Skip empty or very short lines
+            if len(line.strip()) < 3:
+                continue
+                
             # Skip if matches any skip pattern
-            if any(re.search(pattern, line, re.IGNORECASE) for pattern in skip_patterns):
+            if any(re.match(pattern, line.strip(), re.IGNORECASE) for pattern in skip_patterns):
                 continue
             
-            # Look for lines that could be names (2-4 words, proper case)
-            words = line.split()
-            if 2 <= len(words) <= 4:
-                # Check if it looks like a proper name
-                if all(word[0].isupper() and len(word) > 1 and word[1:].islower() for word in words if word.isalpha()):
-                    # Additional check: make sure it's not a common non-name phrase
-                    non_name_words = ['Email', 'Mobile', 'Total', 'Years', 'Months', 'City', 'Country', 'English', 'Hindi']
-                    if not any(word in non_name_words for word in words):
-                        potential_names.append((i, self.clean_name(line)))
+            # Clean the line first
+            cleaned_line = self.clean_and_validate_name(line)
+            
+            # Skip if cleaning removed too much
+            if len(cleaned_line) < 3:
+                continue
+                
+            # Check if it looks like a proper name
+            words = cleaned_line.split()
+            
+            # Must be 2-4 words
+            if not (2 <= len(words) <= 4):
+                continue
+            
+            # Each word should be proper case and reasonable length
+            valid_words = []
+            for word in words:
+                if (len(word) >= 2 and 
+                    word[0].isupper() and 
+                    word[1:].islower() and 
+                    word.isalpha() and 
+                    len(word) <= 15):  # Reasonable name length
+                    valid_words.append(word)
+            
+            # Must have at least 2 valid words
+            if len(valid_words) >= 2:
+                candidate_name = ' '.join(valid_words)
+                
+                # Additional validation
+                if self.is_valid_name(candidate_name):
+                    potential_names.append((i, candidate_name))
         
         # Return the first valid potential name
         if potential_names:
             return potential_names[0][1]
         
-        # Strategy 4: Look anywhere in text for name-like patterns
+        # Strategy 3: Look for name patterns anywhere in text with job titles context
+        job_context_patterns = [
+            r'([A-Z][a-z]{2,}\s+[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})?)\s*[,\n]\s*(?:Software Engineer|Data Analyst|Nurse|Doctor|Manager|Developer|Consultant|Specialist|Executive|Officer|Assistant|Coordinator|Director)',
+            r'([A-Z][a-z]{2,}\s+[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})?)\s*[,\n]\s*(?:B\.?Sc|M\.?Sc|MBA|B\.?Tech|M\.?Tech|BCA|MCA|PhD)',
+        ]
+        
+        for pattern in job_context_patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE | re.MULTILINE)
+            for match in matches:
+                name = self.clean_and_validate_name(match)
+                if self.is_valid_name(name):
+                    return name
+        
+        # Strategy 4: Last resort - look for any proper name pattern
         name_regex = r'\b([A-Z][a-z]{2,}\s+[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})?)\b'
         matches = re.findall(name_regex, text)
         
         for match in matches:
-            if not any(re.search(pattern, match, re.IGNORECASE) for pattern in skip_patterns):
-                return self.clean_name(match)
+            # Skip if it contains skip keywords
+            if any(re.search(pattern, match, re.IGNORECASE) for pattern in skip_patterns):
+                continue
+                
+            name = self.clean_and_validate_name(match)
+            if self.is_valid_name(name):
+                return name
         
-        # Fallback: return first non-empty line (but limit length)
-        return lines[0][:50] if lines else "Name not found"
-    
-    def clean_name(self, name: str) -> str:
-        # Remove special characters and extra spaces
-        name = re.sub(r'[^\w\s\.]', '', name).strip()
-        name = ' '.join(name.split())  # Remove extra spaces
+        # Absolute fallback
+        return "Name not found"
+
+    def clean_and_validate_name(self, name: str) -> str:
+        """Clean and validate a potential name"""
+        if not name:
+            return ""
         
-        # Filter out common non-name words
-        exclude_words = ['resume', 'cv', 'curriculum', 'vitae', 'contact', 'phone', 'email', 'mobile', 'total', 'work']
-        words = [word for word in name.split() if word.lower() not in exclude_words]
+        # Remove common prefixes/suffixes
+        name = re.sub(r'^(mr\.?|mrs\.?|ms\.?|dr\.?|prof\.?)\s*', '', name, flags=re.IGNORECASE)
+        name = re.sub(r'\s*(jr\.?|sr\.?|ii|iii|iv)$', '', name, flags=re.IGNORECASE)
         
-        return ' '.join(words) if words else name
+        # Remove special characters except spaces and dots
+        name = re.sub(r'[^\w\s\.]', '', name)
+        
+        # Remove extra spaces
+        name = ' '.join(name.split())
+        
+        # Remove common non-name words that might be attached
+        exclude_words = [
+            'resume', 'cv', 'curriculum', 'vitae', 'contact', 'phone', 'email', 'mobile',
+            'total', 'work', 'experience', 'years', 'months', 'age', 'personal',
+            'information', 'details', 'profile', 'summary', 'objective', 'about',
+            'skills', 'education', 'qualification', 'training', 'certification',
+            'projects', 'achievements', 'awards', 'languages', 'hobbies', 'interests',
+            'null', 'chapter', 'leaderships', 'leadership', 'memberships', 'membership',
+            'father', 'mother', 'spouse', 'husband', 'wife', 'son', 'daughter'
+        ]
+        
+        words = []
+        for word in name.split():
+            if word.lower() not in exclude_words and len(word) > 1:
+                words.append(word)
+        
+        return ' '.join(words) if words else ""
+
+    def is_valid_name(self, name: str) -> bool:
+        """Validate if the extracted text is likely a real name"""
+        if not name or len(name) < 3:
+            return False
+        
+        words = name.split()
+        
+        # Must have 2-4 words
+        if not (2 <= len(words) <= 4):
+            return False
+        
+        # Check each word
+        for word in words:
+            # Must be alphabetic
+            if not word.isalpha():
+                return False
+            
+            # Must start with capital
+            if not word[0].isupper():
+                return False
+            
+            # Rest should be lowercase (proper case)
+            if not word[1:].islower():
+                return False
+            
+            # Reasonable length (2-15 characters)
+            if not (2 <= len(word) <= 15):
+                return False
+        
+        # Check for common non-name patterns
+        invalid_patterns = [
+            r'(wireshark|cisco|oracle|microsoft|google|apple|amazon|facebook)',
+            r'(java|python|javascript|html|css|sql|php|react|angular)',
+            r'(bachelor|master|degree|diploma|certification|training)',
+            r'(manager|engineer|developer|analyst|consultant|specialist)',
+            r'(experience|education|skills|profile|summary|objective)',
+            r'(personal|contact|mobile|email|phone|address|location)',
+            r'(medical|surgical|nursing|patient|hospital|clinic)',
+            r'(leadership|membership|achievement|project|award)',
+        ]
+        
+        name_lower = name.lower()
+        for pattern in invalid_patterns:
+            if re.search(pattern, name_lower):
+                return False
+        
+        # Check for obvious non-names
+        if any(word in name_lower for word in ['null', 'chapter', 'information', 'details']):
+            return False
+        
+        # Total character length should be reasonable
+        if len(name) > 50:
+            return False
+        
+        return True
     
     def extract_email(self, text: str) -> str:
         pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
@@ -386,7 +534,6 @@ class CVExtractor:
             'original_filename': filename,
             'created_at': datetime.now()
         }
-
 # Initialize extractor
 extractor = CVExtractor()
 
